@@ -36,10 +36,10 @@ const allPlayers = lines.slice(1).map(parseRow).map(p => ({
   hold: p.Hold,
   pos: p.Position,
   pris: parseInt(p.Pris) || 0,
-  vaekst: parseInt(p.Totalvækst) || 0,
+  vaekst: parseInt(p['Vækst Runde 1']) || 0,
 })).filter(p => p.pris > 0 && p.navn && p.hold && ['MV','DEF','MID','ANG'].includes(p.pos));
 
-const EXCLUDE_COUNTRIES = ['Schweiz', 'Bosnien', 'Tjekkiet', 'Sydafrika'];
+const EXCLUDE_COUNTRIES = ['Schweiz', 'Bosnien-Hercegovina', 'Tjekkiet', 'Sydafrika'];
 
 const byPos = { MV: [], DEF: [], MID: [], ANG: [] };
 allPlayers.filter(p => !EXCLUDE_COUNTRIES.includes(p.hold)).forEach(p => byPos[p.pos].push(p));

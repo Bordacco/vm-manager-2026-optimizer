@@ -53,7 +53,7 @@ const titleMap = {
       Position: pos,
       Pris: d.price ?? base.price ?? 0,
       Startpris: d.startPrice ?? base.startPrice ?? 0,
-      Totalvækst: vækst,
+      'Vækst Runde 1': vækst,
       'Vækst%': base.startPrice ? ((vækst / base.startPrice) * 100).toFixed(2) : '0.00',
       'Runde1-points': base.points ?? 0,
       'Popularitet%': ((base.popularity ?? 0) * 100).toFixed(2),
