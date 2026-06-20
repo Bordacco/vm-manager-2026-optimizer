@@ -1,0 +1,16 @@
+{
+  "name": "holdet-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "hent": "node hent_spillere.js",
+    "opdater": "node opdater_runde.js",
+    "optimer": "node optimal_hold.js",
+    "statistik": "node hent_statistik.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.0"
+  }
+}
