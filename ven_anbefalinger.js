@@ -71,7 +71,6 @@ function findPlayer(playersByHold, navn, hold) {
   const exact = pool.find(p => p.navn === navn);
   if (exact) return exact;
   const n1 = normalize(navn);
-  // Fuzzy: tillad små tastefejl/manglende bogstaver (prefix-match begge veje)
   let best = null, bestDiff = Infinity;
   for (const p of pool) {
     const n2 = normalize(p.navn);
@@ -98,106 +97,11 @@ async function fetchSheetRows() {
   }).filter(r => r.Spiller);
 }
 
-(async () => {
-  const sheetRows = await fetchSheetRows();
-  const { players, numRounds } = loadPlayers('holdet_runde1_stats.csv');
-
-  const playersByHold = {};
-  for (const p of players) (playersByHold[p.hold] ??= []).push(p);
-  const countries = [...new Set(players.map(p => p.hold))].sort((a, b) => b.length - a.length);
-
-  // Find den højeste "Opstilling Runde N" / "Værdi efter Runde N", som
-  // findes i arket (deres senest kendte FAKTISKE hold).
-  const headerSample = sheetRows[0] ? Object.keys(sheetRows[0]) : [];
-  const knownRounds = headerSample
-    .map(h => h.match(/^Opstilling Runde (\d+)$/))
-    .filter(Boolean)
-    .map(m => parseInt(m[1], 10))
-    .sort((a, b) => a - b);
-
-  if (!knownRounds.length) {
-    console.error('Fandt ingen "Opstilling Runde N"-kolonner i arket.');
-    process.exit(1);
-  }
-  const latestKnownRound = knownRounds[knownRounds.length - 1];
-
-  console.log('═'.repeat(74));
-  console.log(`  VEN-ANBEFALINGER — baseret på jeres faktiske hold (kendt t.o.m. runde ${latestKnownRound})`);
-  console.log('═'.repeat(74));
-
-  for (const row of sheetRows) {
-    const navn = row.Spiller;
-    const spil = row.Spil; // 'Guld' eller 'Sølv'
-    console.log(`\n${'─'.repeat(74)}\n${navn} (${spil})`);
-
-    // Match alle kendte opstillinger (Runde 1..latestKnownRound) til spillerdata
-    const knownSquads = {};
-    let unresolvedAny = false;
-    for (const r of knownRounds) {
-      const cell = row[`Opstilling Runde ${r}`];
-      if (!cell) continue;
-      const entries = parseOpstilling(cell, countries);
-      const squad = entries.map(e => {
-        const p = findPlayer(playersByHold, e.navn, e.hold);
-        if (!p) { console.log(`  ⚠ Kunne ikke matche "${e.navn}" (${e.hold}) til datasættet.`); unresolvedAny = true; }
-        return { ...e, ref: p };
-      });
-      knownSquads[r] = squad;
-    }
-    if (unresolvedAny) console.log('  (Disse spillere er udeladt af analysen nedenfor.)');
-
-    // --- Kaptajn-tjek for hver kendt runde ---
-    for (const r of knownRounds) {
-      const squad = knownSquads[r].filter(e => e.ref);
-      if (!squad.length) continue;
-      const vIdx = r - 1;
-      const chosenCaptain = squad.find(e => e.isCaptain);
-      const bestCaptain = squad.reduce((a, e) => (e.ref.vaekst[vIdx] || 0) > (a.ref.vaekst[vIdx] || 0) ? e : a);
-      const bestVaekst = bestCaptain.ref.vaekst[vIdx] || 0;
-      if (chosenCaptain && chosenCaptain.ref.key === bestCaptain.ref.key) {
-        console.log(`  Runde ${r}: Kaptajn-valg OK — ${chosenCaptain.ref.navn} havde højeste vækst (${fmtKr(bestVaekst)}).`);
-      } else if (chosenCaptain) {
-        const chosenVaekst = chosenCaptain.ref.vaekst[vIdx] || 0;
-        console.log(`  Runde ${r}: Kaptajn burde have været ${bestCaptain.ref.navn} (${fmtKr(bestVaekst)}) i stedet for ${chosenCaptain.ref.navn} (${fmtKr(chosenVaekst)}) — tabt bonus: ${fmtKr((bestVaekst - chosenVaekst))}.`);
-      } else {
-        console.log(`  Runde ${r}: Ingen kaptajn fundet i data. Højeste vækst havde ${bestCaptain.ref.navn} (${fmtKr(bestVaekst)}).`);
-      }
-    }
-
-    // --- Skift brugt i virkeligheden mellem kendte opstillinger (til at opgøre sølv-budget) ---
-    let solvSwapsUsedSoFar = 0;
-    for (let i = 1; i < knownRounds.length; i++) {
-      const prevR = knownRounds[i - 1], curR = knownRounds[i];
-      const prevKeys = new Set(knownSquads[prevR].filter(e => e.ref).map(e => e.ref.key));
-      const curKeys = new Set(knownSquads[curR].filter(e => e.ref).map(e => e.ref.key));
-      const swappedOut = [...prevKeys].filter(k => !curKeys.has(k)).length;
-      if (swappedOut) console.log(`  (${swappedOut} skift registreret mellem runde ${prevR} og ${curR}.)`);
-      solvSwapsUsedSoFar += swappedOut;
-    }
-
-    // --- Anbefalinger fra den nyeste kendte opstilling og frem til nyeste rundedata ---
-    const baseSquad = knownSquads[latestKnownRound].filter(e => e.ref).map(e => e.ref);
-    if (latestKnownRound >= numRounds) {
-      console.log(`  Ingen nyere rundedata end runde ${latestKnownRound} tilgængelig endnu — afventer "opdater_runde.js".`);
-      continue;
-    }
-    if (baseSquad.length < 11) {
-      console.log('  Springer skifte-anbefalinger over (mangler spiller-match i ovenstående trup).');
-      continue;
-    }
-
-    if (spil === 'Guld') {
-      recommendGuld(baseSquad, latestKnownRound, numRounds, playersByHold, players);
-    } else {
-      recommendSolv(baseSquad, latestKnownRound, numRounds, players, Math.max(0, MAX_SWAPS_SOLV - solvSwapsUsedSoFar));
-    }
-  }
-})().catch(e => { console.error('FEJL:', e.message); process.exit(1); });
-
 // Guld: vurder skift runde for runde (samme regel som ideal_guldhold.js),
 // men startende fra vennens FAKTISKE trup i stedet for et nyt optimalt hold.
-function recommendGuld(startSquad, fromRound, numRounds, playersByHold, allPlayers) {
+function recommendGuld(startSquad, fromRound, numRounds, allPlayers) {
   let squad = startSquad.slice();
+  const rounds = [];
   for (let i = fromRound + 1; i <= numRounds; i++) {
     const vIdx = i - 1;
     const swaps = [];
@@ -206,7 +110,6 @@ function recommendGuld(startSquad, fromRound, numRounds, playersByHold, allPlaye
       improved = false;
       for (let s = 0; s < squad.length; s++) {
         const out = squad[s];
-        const priceOut = priceAtStartOfRound(out, i);
         const usedKeys = new Set(squad.map(p => p.key));
         const country = {};
         squad.forEach(p => country[p.hold] = (country[p.hold] || 0) + 1);
@@ -224,24 +127,17 @@ function recommendGuld(startSquad, fromRound, numRounds, playersByHold, allPlaye
       }
     }
     const captain = squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
-    console.log(`  Runde ${i} (Guld-anbefaling):`);
-    if (swaps.length) {
-      swaps.forEach(sw => console.log(`    Skift ind: ${sw.in.navn} (${sw.in.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}]`));
-    } else {
-      console.log('    Ingen skift nødvendige — trup stadig optimal.');
-    }
-    console.log(`    Kaptajn bør være: ${captain.navn} (${captain.hold}) → ${fmtKr(captain.vaekst[vIdx] || 0)}`);
+    rounds.push({ round: i, swaps, captain, squad: squad.slice() });
   }
+  return rounds;
 }
 
 // Sølv: maks. `swapsRemaining` skift tilbage. Vurder ud fra samlet gevinst
 // resten af de kendte runder (samme tilgang som ideal_solvhold.js), men
 // startende fra vennens faktiske trup.
 function recommendSolv(startSquad, fromRound, numRounds, allPlayers, swapsRemaining) {
-  if (swapsRemaining <= 0) {
-    console.log('  Sølv-budget på 3 skift er allerede brugt — ingen yderligere skift kan anbefales.');
-    return;
-  }
+  if (swapsRemaining <= 0) return { swapsExhausted: true, rounds: [] };
+
   let timeline = [];
   for (let i = fromRound + 1; i <= numRounds; i++) timeline.push(startSquad.slice());
   const swapLog = [];
@@ -280,16 +176,163 @@ function recommendSolv(startSquad, fromRound, numRounds, allPlayers, swapsRemain
     swapLog.push(swap);
   }
 
-  if (!swapLog.length) {
-    console.log(`  Ingen skift var fordelagtige nok (${swapsRemaining} skift tilbage af ${MAX_SWAPS_SOLV}).`);
-  }
-  for (const sw of swapLog) {
-    console.log(`  Runde ${sw.t} (Sølv-anbefaling): Skift ind ${sw.cand.navn} (${sw.cand.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}, samlet gevinst: ${fmtKr(sw.benefit)}]`);
-  }
+  const rounds = [];
   for (let i = fromRound + 1; i <= numRounds; i++) {
     const vIdx = i - 1;
     const squad = timeline[i - fromRound - 1];
     const captain = squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
-    console.log(`    Runde ${i}: kaptajn bør være ${captain.navn} (${captain.hold}) → ${fmtKr(captain.vaekst[vIdx] || 0)}`);
+    rounds.push({ round: i, swaps: swapLog.filter(s => s.t === i), captain, squad: squad.slice() });
   }
+  return { swapsExhausted: false, swapLog, rounds, swapsRemaining };
+}
+
+async function computeVenAnbefalinger(csvPath = 'holdet_runde1_stats.csv') {
+  const sheetRows = await fetchSheetRows();
+  const { players, numRounds } = loadPlayers(csvPath);
+
+  const playersByHold = {};
+  for (const p of players) (playersByHold[p.hold] ??= []).push(p);
+  const countries = [...new Set(players.map(p => p.hold))].sort((a, b) => b.length - a.length);
+
+  const headerSample = sheetRows[0] ? Object.keys(sheetRows[0]) : [];
+  const knownRounds = headerSample
+    .map(h => h.match(/^Opstilling Runde (\d+)$/))
+    .filter(Boolean)
+    .map(m => parseInt(m[1], 10))
+    .sort((a, b) => a - b);
+
+  if (!knownRounds.length) throw new Error('Fandt ingen "Opstilling Runde N"-kolonner i arket.');
+  const latestKnownRound = knownRounds[knownRounds.length - 1];
+
+  const friends = [];
+
+  for (const row of sheetRows) {
+    const navn = row.Spiller;
+    const spil = row.Spil;
+    const friend = { navn, spil, captainChecks: [], unresolved: [], usedSwapTransitions: [], recommendation: null };
+
+    const knownSquads = {};
+    for (const r of knownRounds) {
+      const cell = row[`Opstilling Runde ${r}`];
+      if (!cell) continue;
+      const entries = parseOpstilling(cell, countries);
+      const squad = entries.map(e => {
+        const p = findPlayer(playersByHold, e.navn, e.hold);
+        if (!p) friend.unresolved.push(`${e.navn} (${e.hold})`);
+        return { ...e, ref: p };
+      });
+      knownSquads[r] = squad;
+    }
+
+    for (const r of knownRounds) {
+      const squad = knownSquads[r].filter(e => e.ref);
+      if (!squad.length) continue;
+      const vIdx = r - 1;
+      const chosenCaptain = squad.find(e => e.isCaptain);
+      const bestCaptain = squad.reduce((a, e) => (e.ref.vaekst[vIdx] || 0) > (a.ref.vaekst[vIdx] || 0) ? e : a);
+      const bestVaekst = bestCaptain.ref.vaekst[vIdx] || 0;
+      const ok = chosenCaptain && chosenCaptain.ref.key === bestCaptain.ref.key;
+      friend.captainChecks.push({
+        round: r, ok,
+        chosen: chosenCaptain ? chosenCaptain.ref : null,
+        chosenVaekst: chosenCaptain ? (chosenCaptain.ref.vaekst[vIdx] || 0) : null,
+        best: bestCaptain.ref, bestVaekst,
+      });
+    }
+
+    let solvSwapsUsedSoFar = 0;
+    for (let i = 1; i < knownRounds.length; i++) {
+      const prevR = knownRounds[i - 1], curR = knownRounds[i];
+      const prevKeys = new Set(knownSquads[prevR].filter(e => e.ref).map(e => e.ref.key));
+      const curKeys = new Set(knownSquads[curR].filter(e => e.ref).map(e => e.ref.key));
+      const swappedOut = [...prevKeys].filter(k => !curKeys.has(k)).length;
+      if (swappedOut) friend.usedSwapTransitions.push({ from: prevR, to: curR, count: swappedOut });
+      solvSwapsUsedSoFar += swappedOut;
+    }
+
+    const baseSquad = knownSquads[latestKnownRound].filter(e => e.ref).map(e => e.ref);
+    friend.latestKnownRound = latestKnownRound;
+    friend.numRounds = numRounds;
+
+    if (latestKnownRound >= numRounds) {
+      friend.status = 'waiting';
+    } else if (baseSquad.length < 11) {
+      friend.status = 'incomplete';
+    } else if (spil === 'Guld') {
+      friend.status = 'ok';
+      friend.recommendation = { type: 'Guld', rounds: recommendGuld(baseSquad, latestKnownRound, numRounds, players) };
+    } else {
+      friend.status = 'ok';
+      friend.recommendation = { type: 'Sølv', ...recommendSolv(baseSquad, latestKnownRound, numRounds, players, Math.max(0, MAX_SWAPS_SOLV - solvSwapsUsedSoFar)) };
+    }
+
+    friends.push(friend);
+  }
+
+  return { friends, latestKnownRound, numRounds };
+}
+
+function printReport({ friends, latestKnownRound }) {
+  console.log('═'.repeat(74));
+  console.log(`  VEN-ANBEFALINGER — baseret på jeres faktiske hold (kendt t.o.m. runde ${latestKnownRound})`);
+  console.log('═'.repeat(74));
+
+  for (const f of friends) {
+    console.log(`\n${'─'.repeat(74)}\n${f.navn} (${f.spil})`);
+    for (const u of f.unresolved) console.log(`  ⚠ Kunne ikke matche "${u}" til datasættet.`);
+    if (f.unresolved.length) console.log('  (Disse spillere er udeladt af analysen nedenfor.)');
+
+    for (const c of f.captainChecks) {
+      if (c.ok) {
+        console.log(`  Runde ${c.round}: Kaptajn-valg OK — ${c.chosen.navn} havde højeste vækst (${fmtKr(c.bestVaekst)}).`);
+      } else if (c.chosen) {
+        console.log(`  Runde ${c.round}: Kaptajn burde have været ${c.best.navn} (${fmtKr(c.bestVaekst)}) i stedet for ${c.chosen.navn} (${fmtKr(c.chosenVaekst)}) — tabt bonus: ${fmtKr(c.bestVaekst - c.chosenVaekst)}.`);
+      } else {
+        console.log(`  Runde ${c.round}: Ingen kaptajn fundet i data. Højeste vækst havde ${c.best.navn} (${fmtKr(c.bestVaekst)}).`);
+      }
+    }
+    for (const t of f.usedSwapTransitions) console.log(`  (${t.count} skift registreret mellem runde ${t.from} og ${t.to}.)`);
+
+    if (f.status === 'waiting') {
+      console.log(`  Ingen nyere rundedata end runde ${f.latestKnownRound} tilgængelig endnu — afventer "opdater_runde.js".`);
+      continue;
+    }
+    if (f.status === 'incomplete') {
+      console.log('  Springer skifte-anbefalinger over (mangler spiller-match i ovenstående trup).');
+      continue;
+    }
+
+    const rec = f.recommendation;
+    if (rec.type === 'Guld') {
+      for (const r of rec.rounds) {
+        console.log(`  Runde ${r.round} (Guld-anbefaling):`);
+        if (r.swaps.length) {
+          r.swaps.forEach(sw => console.log(`    Skift ind: ${sw.in.navn} (${sw.in.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}]`));
+        } else {
+          console.log('    Ingen skift nødvendige — trup stadig optimal.');
+        }
+        console.log(`    Kaptajn bør være: ${r.captain.navn} (${r.captain.hold}) → ${fmtKr(r.captain.vaekst[r.round - 1] || 0)}`);
+        console.log('    Trup: ' + r.squad.map(p => `${p.navn} (${p.hold})`).join(', '));
+      }
+    } else {
+      if (rec.swapsExhausted) {
+        console.log('  Sølv-budget på 3 skift er allerede brugt — ingen yderligere skift kan anbefales.');
+        continue;
+      }
+      if (!rec.swapLog.length) console.log(`  Ingen skift var fordelagtige nok (${rec.swapsRemaining} skift tilbage af ${MAX_SWAPS_SOLV}).`);
+      for (const sw of rec.swapLog) {
+        console.log(`  Runde ${sw.t} (Sølv-anbefaling): Skift ind ${sw.cand.navn} (${sw.cand.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}, samlet gevinst: ${fmtKr(sw.benefit)}]`);
+      }
+      for (const r of rec.rounds) {
+        console.log(`    Runde ${r.round}: kaptajn bør være ${r.captain.navn} (${r.captain.hold}) → ${fmtKr(r.captain.vaekst[r.round - 1] || 0)}`);
+        console.log('    Trup: ' + r.squad.map(p => `${p.navn} (${p.hold})`).join(', '));
+      }
+    }
+  }
+}
+
+module.exports = { computeVenAnbefalinger };
+
+if (require.main === module) {
+  computeVenAnbefalinger().then(printReport).catch(e => { console.error('FEJL:', e.message); process.exit(1); });
 }
