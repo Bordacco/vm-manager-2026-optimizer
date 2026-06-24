@@ -183,7 +183,14 @@ function runGoldTrajectory(players, numRounds, { fromRound = 1, baseSquad = [], 
   let cumulativeNetto = 0;
   let cumulativeFees = 0;
 
-  for (let i = fromRound; i <= numRounds; i++) {
+  // Hvis der allerede er en kendt, faktisk trup (fx en vens virkelige
+  // runde-N-hold), er den et historisk faktum og kan ikke om-optimeres
+  // med tilbagevirkende kraft — første reelle beslutning ligger i den
+  // EFTERFØLGENDE runde. Kun når der slet ingen trup findes endnu
+  // (personlige hold fra runde 1) skal selve fromRound beregnes.
+  const startOpt = prevSquad.length ? fromRound + 1 : fromRound;
+
+  for (let i = startOpt; i <= numRounds; i++) {
     const vIdx = i - 1;
     const isInitialPurchase = prevSquad.length === 0;
     const prevKeys = new Set(prevSquad.map(p => p.key));
