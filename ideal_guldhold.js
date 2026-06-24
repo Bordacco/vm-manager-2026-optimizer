@@ -1,98 +1,43 @@
 // Ideal GULDHOLD efter hver runde: ubegrænsede spillerskift mellem
-// runder, men hvert indskiftet spiller koster et transfergebyr på 1% af
-// spillerens pris ved starten af den runde, hvor skiftet sker. Da man kan
-// skifte igen i den efterfølgende runde, er det altid optimalt at vurdere
-// skift runde for runde (i modsætning til sølvhold, hvor skift er en
-// begrænset ressource, der skal fordeles over hele turneringen).
+// runder, og formationen må ændre sig frit fra runde til runde (alle 7
+// tilladte formationer genovervejes hver gang). Hvert indskiftet spiller
+// koster et transfergebyr på 1% af spillerens pris ved starten af den
+// runde, hvor skiftet sker — allerede ejede spillere kan beholdes uden
+// gebyr. Da man kan skifte igen i den efterfølgende runde, er det altid
+// optimalt at genoptimere truppen fuldt ud runde for runde (i modsætning
+// til sølvhold, hvor skift er en begrænset ressource).
 //
-// Beslutningsregel pr. mulig skift A → B i runde i:
-//   gevinst = B.vækst_i − A.vækst_i − gebyr(B)   (gebyr = 1% af B's pris)
-// Skiftet udføres kun hvis gevinsten er positiv og der er kontanter nok.
+// Konkret: hver runde får man et "budget" = nuværende kontanter + den
+// nuværende trups samlede værdi. optimizeSquad() finder så den bedst
+// mulige sammensætning af gammelt (gratis) og nyt (pris + 1% gebyr)
+// inden for det budget, over alle 7 formationer.
 //
 // Køres efter hver opdatering af holdet_runde1_stats.csv (dvs. efter
 // opdater_runde.js er kørt for den nyeste runde).
 
-const { BUDGET, MAX_PER_COUNTRY, loadPlayers, priceAtStartOfRound, optimizeSquad, fmtKr } = require('./holdet_lib');
+const { BUDGET, loadPlayers, runGoldTrajectory, fmtKr } = require('./holdet_lib');
 
 function computeGuldhold(csvPath = 'holdet_runde1_stats.csv') {
   const { players, numRounds } = loadPlayers(csvPath);
   if (numRounds === 0) throw new Error('Ingen "Vækst Runde N"-kolonner fundet i CSV-filen.');
-
-  const round1 = optimizeSquad(players, 0, p => p.startpris, BUDGET);
-  let squad = round1.selected.slice();
-  let cash = (BUDGET - round1.spent) * 1.01;
-  let cumulativeNetto = round1.score;
-  let cumulativeFees = 0;
-
-  const rounds = [{
-    round: 1, formation: round1.formation, squad: squad.slice(), spent: round1.spent,
-    score: round1.score, fees: 0, swaps: [], cash,
-  }];
-
-  for (let i = 2; i <= numRounds; i++) {
-    const vIdx = i - 1;
-    const swapsThisRound = [];
-    let feesThisRound = 0;
-
-    let improved = true;
-    while (improved) {
-      improved = false;
-      for (let s = 0; s < squad.length; s++) {
-        const out = squad[s];
-        const priceOut = priceAtStartOfRound(out, i);
-        const usedKeys = new Set(squad.map(p => p.key));
-        const country = {};
-        squad.forEach(p => country[p.hold] = (country[p.hold] || 0) + 1);
-
-        let best = null, bestGain = 0, bestCashNeeded = 0, bestFee = 0;
-        for (const cand of players) {
-          if (cand.pos !== out.pos || usedKeys.has(cand.key)) continue;
-          const wouldBeCount = cand.hold === out.hold ? (country[cand.hold] || 0) : (country[cand.hold] || 0) + 1;
-          if (wouldBeCount > MAX_PER_COUNTRY) continue;
-
-          const priceIn = priceAtStartOfRound(cand, i);
-          const fee = Math.round(priceIn * 0.01);
-          const gain = (cand.vaekst[vIdx] || 0) - (out.vaekst[vIdx] || 0) - fee;
-          const cashNeeded = priceIn + fee - priceOut;
-          if (gain > bestGain && cashNeeded <= cash) {
-            best = cand; bestGain = gain; bestCashNeeded = cashNeeded; bestFee = fee;
-          }
-        }
-
-        if (best) {
-          cash -= bestCashNeeded;
-          feesThisRound += bestFee;
-          swapsThisRound.push({ out, in: best, fee: bestFee });
-          squad[s] = best;
-          improved = true;
-        }
-      }
-    }
-
-    const roundScore = squad.reduce((s, p) => s + (p.vaekst[vIdx] || 0), 0) + Math.max(...squad.map(p => p.vaekst[vIdx] || 0));
-    const netto = roundScore - feesThisRound;
-    cumulativeNetto += netto;
-    cumulativeFees += feesThisRound;
-    cash *= 1.01;
-
-    rounds.push({ round: i, squad: squad.slice(), score: roundScore, fees: feesThisRound, swaps: swapsThisRound, cash });
-  }
-
-  return { rounds, cumulativeNetto, cumulativeFees, numRounds };
+  return runGoldTrajectory(players, numRounds, { fromRound: 1, baseSquad: [], startCash: BUDGET });
 }
 
 function printReport({ rounds, cumulativeNetto, cumulativeFees, numRounds }) {
   console.log('═'.repeat(70));
-  console.log('  GULDHOLD — ideal trup runde for runde (ubegrænsede skift)');
+  console.log('  GULDHOLD — ideal trup runde for runde (ubegrænsede skift, fri formation)');
   console.log('═'.repeat(70));
 
   for (const r of rounds) {
     const vIdx = r.round - 1;
     const captain = r.squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
-    console.log(`\nRunde ${r.round}${r.formation ? ` (${r.formation})` : ''}:`);
-    if (r.swaps.length) {
-      for (const sw of r.swaps) {
-        console.log(`  Skift: ${sw.out.navn} (${sw.out.hold}) → ${sw.in.navn} (${sw.in.hold})  [gebyr ${fmtKr(sw.fee)}]`);
+    console.log(`\nRunde ${r.round} (${r.formation}):`);
+    if (r.swapsIn.length) {
+      for (const sw of r.swapsIn) {
+        console.log(`  Ind: ${sw.player.navn} (${sw.player.hold}, ${sw.player.pos})  [gebyr ${fmtKr(sw.fee)}]`);
+      }
+      for (const out of r.swapsOut) {
+        console.log(`  Ud:  ${out.navn} (${out.hold}, ${out.pos})`);
       }
     } else if (r.round > 1) {
       console.log('  Ingen skift — eksisterende trup var stadig optimal.');

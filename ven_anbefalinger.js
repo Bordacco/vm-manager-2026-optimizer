@@ -16,7 +16,7 @@
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-const { MAX_PER_COUNTRY, loadPlayers, priceAtStartOfRound, fmtKr } = require('./holdet_lib');
+const { BUDGET, loadPlayers, fmtKr, runGoldTrajectory, runSilverTrajectory } = require('./holdet_lib');
 
 const SHEET_ID = '1UIv0pgPzvA-jqG1ojHAxX_vWm_K5M8jJM-AGTVFdIlA';
 const GID = '1401507306'; // fanen "Ark5"
@@ -97,95 +97,6 @@ async function fetchSheetRows() {
   }).filter(r => r.Spiller);
 }
 
-// Guld: vurder skift runde for runde (samme regel som ideal_guldhold.js),
-// men startende fra vennens FAKTISKE trup i stedet for et nyt optimalt hold.
-function recommendGuld(startSquad, fromRound, numRounds, allPlayers) {
-  let squad = startSquad.slice();
-  const rounds = [];
-  for (let i = fromRound + 1; i <= numRounds; i++) {
-    const vIdx = i - 1;
-    const swaps = [];
-    let improved = true;
-    while (improved) {
-      improved = false;
-      for (let s = 0; s < squad.length; s++) {
-        const out = squad[s];
-        const usedKeys = new Set(squad.map(p => p.key));
-        const country = {};
-        squad.forEach(p => country[p.hold] = (country[p.hold] || 0) + 1);
-        let best = null, bestGain = 0;
-        for (const cand of allPlayers) {
-          if (cand.pos !== out.pos || usedKeys.has(cand.key)) continue;
-          const wouldBeCount = cand.hold === out.hold ? (country[cand.hold] || 0) : (country[cand.hold] || 0) + 1;
-          if (wouldBeCount > MAX_PER_COUNTRY) continue;
-          const priceIn = priceAtStartOfRound(cand, i);
-          const fee = Math.round(priceIn * 0.01);
-          const gain = (cand.vaekst[vIdx] || 0) - (out.vaekst[vIdx] || 0) - fee;
-          if (gain > bestGain) { best = cand; bestGain = gain; }
-        }
-        if (best) { swaps.push({ out, in: best, fee: Math.round(priceAtStartOfRound(best, i) * 0.01) }); squad[s] = best; improved = true; }
-      }
-    }
-    const captain = squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
-    rounds.push({ round: i, swaps, captain, squad: squad.slice() });
-  }
-  return rounds;
-}
-
-// Sølv: maks. `swapsRemaining` skift tilbage. Vurder ud fra samlet gevinst
-// resten af de kendte runder (samme tilgang som ideal_solvhold.js), men
-// startende fra vennens faktiske trup.
-function recommendSolv(startSquad, fromRound, numRounds, allPlayers, swapsRemaining) {
-  if (swapsRemaining <= 0) return { swapsExhausted: true, rounds: [] };
-
-  let timeline = [];
-  for (let i = fromRound + 1; i <= numRounds; i++) timeline.push(startSquad.slice());
-  const swapLog = [];
-
-  function findBestSwap() {
-    let best = null;
-    for (let t = fromRound + 1; t <= numRounds; t++) {
-      const tIdx = t - fromRound - 1;
-      const squadAtT = timeline[tIdx];
-      const country = {};
-      squadAtT.forEach(p => country[p.hold] = (country[p.hold] || 0) + 1);
-      for (const out of squadAtT) {
-        for (const cand of allPlayers) {
-          if (cand.pos !== out.pos) continue;
-          if (squadAtT.some(p => p.key === cand.key)) continue;
-          const wouldBeCount = cand.hold === out.hold ? (country[cand.hold] || 0) : (country[cand.hold] || 0) + 1;
-          if (wouldBeCount > MAX_PER_COUNTRY) continue;
-          const priceIn = priceAtStartOfRound(cand, t);
-          const fee = Math.round(priceIn * 0.01);
-          let benefit = -fee;
-          for (let r = t; r <= numRounds; r++) benefit += (cand.vaekst[r - 1] || 0) - (out.vaekst[r - 1] || 0);
-          if (!best || benefit > best.benefit) best = { t, out, cand, fee, benefit };
-        }
-      }
-    }
-    return best;
-  }
-
-  while (swapLog.length < swapsRemaining) {
-    const swap = findBestSwap();
-    if (!swap || swap.benefit <= 0) break;
-    for (let r = swap.t; r <= numRounds; r++) {
-      const idx = r - fromRound - 1;
-      timeline[idx] = timeline[idx].map(p => p.key === swap.out.key ? swap.cand : p);
-    }
-    swapLog.push(swap);
-  }
-
-  const rounds = [];
-  for (let i = fromRound + 1; i <= numRounds; i++) {
-    const vIdx = i - 1;
-    const squad = timeline[i - fromRound - 1];
-    const captain = squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
-    rounds.push({ round: i, swaps: swapLog.filter(s => s.t === i), captain, squad: squad.slice() });
-  }
-  return { swapsExhausted: false, swapLog, rounds, swapsRemaining };
-}
-
 async function computeVenAnbefalinger(csvPath = 'holdet_runde1_stats.csv') {
   const sheetRows = await fetchSheetRows();
   const { players, numRounds } = loadPlayers(csvPath);
@@ -258,12 +169,27 @@ async function computeVenAnbefalinger(csvPath = 'holdet_runde1_stats.csv') {
       friend.status = 'waiting';
     } else if (baseSquad.length < 11) {
       friend.status = 'incomplete';
-    } else if (spil === 'Guld') {
-      friend.status = 'ok';
-      friend.recommendation = { type: 'Guld', rounds: recommendGuld(baseSquad, latestKnownRound, numRounds, players) };
     } else {
       friend.status = 'ok';
-      friend.recommendation = { type: 'Sølv', ...recommendSolv(baseSquad, latestKnownRound, numRounds, players, Math.max(0, MAX_SWAPS_SOLV - solvSwapsUsedSoFar)) };
+      // Kontanter er ikke kendt fra arket — antager ingen tidligere skift
+      // ud over de allerede registrerede, dvs. budgettet er 50M minus
+      // startprisen på den senest kendte trup.
+      const startCash = BUDGET - baseSquad.reduce((s, p) => s + p.startpris, 0);
+      if (spil === 'Guld') {
+        const traj = runGoldTrajectory(players, numRounds, { fromRound: latestKnownRound, baseSquad, startCash });
+        friend.recommendation = { type: 'Guld', rounds: traj.rounds.filter(r => r.round > latestKnownRound) };
+      } else {
+        const swapsRemaining = Math.max(0, MAX_SWAPS_SOLV - solvSwapsUsedSoFar);
+        if (swapsRemaining <= 0) {
+          friend.recommendation = { type: 'Sølv', swapsExhausted: true, rounds: [] };
+        } else {
+          const traj = runSilverTrajectory(players, numRounds, { fromRound: latestKnownRound, baseSquad, swapsAllowed: swapsRemaining, startCash });
+          friend.recommendation = {
+            type: 'Sølv', swapsExhausted: false, swapLog: traj.swapLog, swapsRemaining,
+            rounds: traj.rounds.filter(r => r.round > latestKnownRound),
+          };
+        }
+      }
     }
 
     friends.push(friend);
@@ -305,13 +231,16 @@ function printReport({ friends, latestKnownRound }) {
     const rec = f.recommendation;
     if (rec.type === 'Guld') {
       for (const r of rec.rounds) {
-        console.log(`  Runde ${r.round} (Guld-anbefaling):`);
-        if (r.swaps.length) {
-          r.swaps.forEach(sw => console.log(`    Skift ind: ${sw.in.navn} (${sw.in.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}]`));
+        const vIdx = r.round - 1;
+        const captain = r.squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
+        console.log(`  Runde ${r.round} (Guld-anbefaling, ${r.formation}):`);
+        if (r.swapsIn.length) {
+          r.swapsIn.forEach(sw => console.log(`    Ind: ${sw.player.navn} (${sw.player.hold}, ${sw.player.pos})  [gebyr ${fmtKr(sw.fee)}]`));
+          r.swapsOut.forEach(out => console.log(`    Ud:  ${out.navn} (${out.hold}, ${out.pos})`));
         } else {
           console.log('    Ingen skift nødvendige — trup stadig optimal.');
         }
-        console.log(`    Kaptajn bør være: ${r.captain.navn} (${r.captain.hold}) → ${fmtKr(r.captain.vaekst[r.round - 1] || 0)}`);
+        console.log(`    Kaptajn bør være: ${captain.navn} (${captain.hold}) → ${fmtKr(captain.vaekst[vIdx] || 0)}`);
         console.log('    Trup: ' + r.squad.map(p => `${p.navn} (${p.hold})`).join(', '));
       }
     } else {
@@ -321,10 +250,12 @@ function printReport({ friends, latestKnownRound }) {
       }
       if (!rec.swapLog.length) console.log(`  Ingen skift var fordelagtige nok (${rec.swapsRemaining} skift tilbage af ${MAX_SWAPS_SOLV}).`);
       for (const sw of rec.swapLog) {
-        console.log(`  Runde ${sw.t} (Sølv-anbefaling): Skift ind ${sw.cand.navn} (${sw.cand.hold}) ud med ${sw.out.navn} (${sw.out.hold})  [gebyr ${fmtKr(sw.fee)}, samlet gevinst: ${fmtKr(sw.benefit)}]`);
+        console.log(`  Runde ${sw.t} (Sølv-anbefaling): Skift ind ${sw.cand.navn} (${sw.cand.hold}, ${sw.cand.pos}) ud med ${sw.out.navn} (${sw.out.hold}, ${sw.out.pos})  [gebyr ${fmtKr(sw.fee)}, samlet gevinst: ${fmtKr(sw.benefit)}]`);
       }
       for (const r of rec.rounds) {
-        console.log(`    Runde ${r.round}: kaptajn bør være ${r.captain.navn} (${r.captain.hold}) → ${fmtKr(r.captain.vaekst[r.round - 1] || 0)}`);
+        const vIdx = r.round - 1;
+        const captain = r.squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
+        console.log(`    Runde ${r.round}: kaptajn bør være ${captain.navn} (${captain.hold}) → ${fmtKr(captain.vaekst[vIdx] || 0)}`);
         console.log('    Trup: ' + r.squad.map(p => `${p.navn} (${p.hold})`).join(', '));
       }
     }

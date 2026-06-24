@@ -64,7 +64,8 @@ function printMarkdownTable(title, rows) {
     if (rec.swapsExhausted || !rec.rounds.length) continue;
     const last = rec.rounds[rec.rounds.length - 1];
     const vIdx = last.round - 1;
-    const rows = squadRows(last.squad, vIdx, last.captain.key);
+    const captain = last.squad.reduce((a, p) => (p.vaekst[vIdx] || 0) > (a.vaekst[vIdx] || 0) ? p : a);
+    const rows = squadRows(last.squad, vIdx, captain.key);
     printMarkdownTable(`${f.navn} (${f.spil}) — anbefalet hold Runde ${last.round}`, rows);
     sheets[`${f.navn} (${f.spil})`] = rows;
   }
