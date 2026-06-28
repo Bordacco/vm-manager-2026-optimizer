@@ -168,15 +168,56 @@ function isValidComposition(squad) {
   return FORMATIONS.some(f => f.def === counts.DEF && f.mid === counts.MID && f.ang === counts.ANG);
 }
 
+// Beregner, for hver spiller og hver runde r, den bedst mulige akkumulerede
+// værdi (vækst minus gebyrer) af at holde netop DEN spiller fra runde r og
+// frem til numRounds, hvis man hver efterfølgende runde optimalt vælger
+// mellem at BEHOLDE ham (ingen gebyr) eller SKIFTE til den bedst mulige
+// alternative spiller i samme position (gebyr). Løses med baglæns
+// induktion pr. position, så fx en spiller der er god i runde 1 og 3 men
+// dårlig i runde 2 kan vise sig mere værd at beholde end at skifte ud og
+// ind igen, hvis de to gebyrer overstiger det man taber ved at holde ham
+// igennem den dårlige runde. Bruges som udvælgelseskriterium i
+// runGoldTrajectory i stedet for rundens isolerede vækst.
+function computeLookaheadValues(players, numRounds) {
+  const byPos = { MV: [], DEF: [], MID: [], ANG: [] };
+  players.forEach(p => byPos[p.pos].push(p));
+
+  const table = new Map();
+  players.forEach(p => table.set(p.key, new Array(numRounds + 1).fill(0)));
+
+  for (const pos of Object.keys(byPos)) {
+    const pool = byPos[pos];
+    for (const p of pool) table.get(p.key)[numRounds] = p.vaekst[numRounds - 1] || 0;
+
+    for (let r = numRounds - 1; r >= 1; r--) {
+      let bestNext = -Infinity;
+      for (const q of pool) {
+        const fee = Math.round(priceAtStartOfRound(q, r + 1) * 0.01);
+        const v = table.get(q.key)[r + 1] - fee;
+        if (v > bestNext) bestNext = v;
+      }
+      for (const p of pool) {
+        const keepValue = table.get(p.key)[r + 1];
+        table.get(p.key)[r] = (p.vaekst[r - 1] || 0) + Math.max(keepValue, bestNext);
+      }
+    }
+  }
+  return table;
+}
+
 // GULDHOLD med fri formation: hver runde genoptimeres truppen fuldt ud
 // (alle 7 formationer prøves igen), men spillere der allerede ejes kan
 // beholdes uden gebyr, mens nye spillere koster pris × 1,01 (pris +
 // 1%-gebyr). Det betyder reelt at man "låner" hele sin nuværende
 // trups værdi + kontanter som budget for runden, og optimizeSquad finder
-// den bedst mulige sammensætning af gammelt og nyt inden for det budget.
+// den bedst mulige sammensætning af gammelt og nyt inden for det budget —
+// men udvælgelsen sker ud fra lookahead-værdien (se ovenfor), ikke kun
+// rundens egen vækst, så en spiller der er god igen senere ikke skiftes
+// ud blot fordi han har en enkelt svag runde.
 // fromRound/baseSquad/startCash lader funktionen fortsætte fra en
 // allerede kendt trup (bruges af ven_anbefalinger.js).
 function runGoldTrajectory(players, numRounds, { fromRound = 1, baseSquad = [], startCash = BUDGET } = {}) {
+  const lookahead = computeLookaheadValues(players, numRounds);
   let prevSquad = baseSquad.slice();
   let cash = startCash;
   const rounds = [];
@@ -199,11 +240,12 @@ function runGoldTrajectory(players, numRounds, { fromRound = 1, baseSquad = [], 
     const priceFn = p => (isInitialPurchase || prevKeys.has(p.key))
       ? priceAtStartOfRound(p, i)
       : priceAtStartOfRound(p, i) * 1.01;
-    // Værdien til selve udvælgelsen skal trække gebyret fra for NYE
+    // Værdien til selve udvælgelsen er spillerens lookahead-værdi fra denne
+    // runde og frem (se computeLookaheadValues), minus gebyret for NYE
     // spillere (ellers vil optimeringen frit "købe" bedre spillere uden
     // at det rigtige gebyr-tab indgår i sammenligningen — kun i
     // budgetcheck'et). Allerede ejede spillere har intet gebyr at trække fra.
-    const valueFn = p => (p.vaekst[vIdx] || 0) - ((isInitialPurchase || prevKeys.has(p.key)) ? 0 : Math.round(priceAtStartOfRound(p, i) * 0.01));
+    const valueFn = p => lookahead.get(p.key)[i] - ((isInitialPurchase || prevKeys.has(p.key)) ? 0 : Math.round(priceAtStartOfRound(p, i) * 0.01));
 
     const result = optimizeSquad(players, vIdx, priceFn, roundBudget, valueFn);
     const newSquad = result.selected;
@@ -338,5 +380,5 @@ function fmtKr(n) {
 module.exports = {
   BUDGET, MAX_PER_COUNTRY, FORMATIONS,
   loadPlayers, priceAtStartOfRound, optimizeSquad, fmtKr,
-  isValidComposition, runGoldTrajectory, runSilverTrajectory,
+  isValidComposition, computeLookaheadValues, runGoldTrajectory, runSilverTrajectory,
 };
